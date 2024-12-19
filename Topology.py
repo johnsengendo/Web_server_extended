@@ -26,18 +26,30 @@ def add_web_container(manager, name, role, image, shared_dir):
         }
     )
 
-# Function to start the web server
+# Function to start server
 def start_server():
     subprocess.run(['docker', 'exec', '-it', 'host_server', 'bash', '-c', 'cd /home && python3 Web_Server.py'])
 
-# Function to start the web client
+# Function to start client
 def start_client():
     subprocess.run(['docker', 'exec', '-it', 'browsing_client', 'bash', '-c', 'cd /home && python3 Web_Client.py'])
+
+# Function to start iperf server on h6
+def start_iperf_server(host):
+    host.cmd('iperf -s -p 5001 &')
+
+# Function to start iperf client on h3
+def start_iperf_client(host):
+    host.cmd('iperf -c 10.0.0.6 -p 5001 -t 5 &')
+
+# Function to stop iperf client on h3
+def stop_iperf_client(host):
+    host.cmd('pkill iperf')
 
 # Main execution starts here
 if __name__ == '__main__':
     # Setting up command-line argument parsing
-    parser = argparse.ArgumentParser(description='Web service with iperf test scenario.')
+    parser = argparse.ArgumentParser(description='web server application.')
     parser.add_argument('--autotest', dest='autotest', action='store_const', const=True, default=False,
                         help='Enables automatic testing of the topology and closes the web app.')
     args = parser.parse_args()
@@ -68,95 +80,79 @@ if __name__ == '__main__':
 
     # Setting up Docker hosts as network nodes
     info('*** Creating hosts\n')
-    h1 = net.addDockerHost('h1', dimage='dev_test', ip='10.0.0.1', docker_args={'hostname': 'h1'})
-    h2 = net.addDockerHost('h2', dimage='dev_test', ip='10.0.0.2', docker_args={'hostname': 'h2'})
-    h3 = net.addDockerHost('h3', dimage='dev_test', ip='10.0.0.3', docker_args={'hostname': 'h3'})
-    h4 = net.addDockerHost('h4', dimage='dev_test', ip='10.0.0.4', docker_args={'hostname': 'h4'})
-    h5 = net.addDockerHost('h5', dimage='dev_test', ip='10.0.0.5', docker_args={'hostname': 'h5'})
-    h6 = net.addDockerHost('h6', dimage='dev_test', ip='10.0.0.6', docker_args={'hostname': 'h6'})
+    server = net.addDockerHost(
+        'server', dimage='dev_test', ip='10.0.0.1', docker_args={'hostname': 'server'}
+    )
+    client = net.addDockerHost(
+        'client', dimage='dev_test', ip='10.0.0.2', docker_args={'hostname': 'client'}
+    )
+
+    # Adding normal hosts
+    h1 = net.addHost('h1', ip='10.0.0.3')
+    h2 = net.addHost('h2', ip='10.0.0.4')
+    h3 = net.addHost('h3', ip='10.0.0.5')
+    h6 = net.addHost('h6', ip='10.0.0.6')
 
     # Adding switches and links to the network
     info('*** Adding switches and links\n')
-    s1 = net.addSwitch('s1')
-    s2 = net.addSwitch('s2')
+    switch1 = net.addSwitch('s1')
+    switch2 = net.addSwitch('s2')
 
-    # Connecting hosts to switches
-    net.addLink(h1, s1)
-    net.addLink(h2, s1)
-    net.addLink(h3, s1)
-    net.addLink(h4, s2)
-    net.addLink(h5, s2)
-    net.addLink(h6, s2)
-
-    # Connecting the switches with a link having bandwidth and delay
-    middle_link = net.addLink(s1, s2, bw=bandwidth, delay=f'{delay}ms')
+    net.addLink(switch1, server)
+    net.addLink(switch1, h1)
+    net.addLink(switch1, switch2, bw=bandwidth, delay=f'{delay}ms')
+    net.addLink(switch2, client)
+    net.addLink(switch2, h2)
+    net.addLink(switch2, h3)
+    net.addLink(switch2, h6)
 
     # Starting the network
     info('\n*** Starting network\n')
     net.start()
 
-    # Testing connectivity by pinging hosts
-    info("*** Testing connectivity between h1 and h2\n")
-    reply = h1.cmd("ping -c 5 10.0.0.2")
+    # Testing connectivity by pinging server from client
+    info("*** Client host pings the server to test for connectivity: \n")
+    reply = client.cmd("ping -c 5 10.0.0.1")
     print(reply)
 
-    # Adding containers for web server and client
-    web_server_host = net.addDockerHost(
-    'host_server',
-    dimage='web_server',
-    ip='10.0.0.7',  # IP address for the web server
-    docker_args={'hostname': 'host_server', 'volumes': {shared_directory: {'bind': '/home/pcap/', 'mode': 'rw'}}}
-    )
+    # Adding containers
+    web_server_host = add_web_container(mgr, 'host_server', 'server', 'web_server', shared_directory)
+    web_browser = add_web_container(mgr, 'browsing_client', 'client', 'web_client', shared_directory)
 
-    web_browser = net.addDockerHost(
-    'browsing_client',
-    dimage='web_client',
-    ip='10.0.0.8',  # IP address for the web client
-    docker_args={'hostname': 'browsing_client', 'volumes': {shared_directory: {'bind': '/home/pcap/', 'mode': 'rw'}}}
-    )
-
-    # Creating threads to run the server and client for web service
+    # Creating threads to run the server and client
     server_thread = threading.Thread(target=start_server)
     client_thread = threading.Thread(target=start_client)
 
-    # Starting the web server-client threads
-    info('*** Starting web service communication between H1 and H2\n')
+    # Starting the threads
     server_thread.start()
     client_thread.start()
 
-    # Introduce a 2-second delay before starting iperf communication
-    time.sleep(2)
+    # Start iperf server on h6
+    start_iperf_server(h6)
 
-    # Starting iperf communication between H3 and H6
-    info('*** Starting iperf communication between H3 and H6\n')
-    iperf_server_thread = threading.Thread(
-        target=lambda: net.get('h6').cmd('iperf -s &')  # Start iperf server on H6
-    )
-    iperf_client_thread = threading.Thread(
-        target=lambda: net.get('h3').cmd('iperf -c 10.0.0.6 -t 5')  # Start iperf client on H3 for 5 seconds
-    )
+    # Use a timer to start iperf communication between h3 and h6 after 2 seconds
+    def start_iperf_after_delay():
+        time.sleep(2)
+        start_iperf_client(h3)
+        time.sleep(5)
+        stop_iperf_client(h3)
 
-    iperf_server_thread.start()
-    iperf_client_thread.start()
-
-    # Wait for the iperf communication to finish
-    iperf_client_thread.join()
-    info('*** Iperf communication finished\n')
-
-    # Stop the iperf server
-    net.get('h6').cmd('pkill -f iperf')
+    iperf_thread = threading.Thread(target=start_iperf_after_delay)
+    iperf_thread.start()
 
     # Waiting for the server and client threads to finish
     server_thread.join()
     client_thread.join()
-    info('*** Web service communication finished\n')
+
+    # Wait for the iperf thread to finish
+    iperf_thread.join()
 
     # If not in autotest mode, start an interactive CLI
     if not autotest:
         CLI(net)
 
     # Cleanup: removing containers and stopping the network and VNF manager
-    mgr.removeContainer('host_server')
-    mgr.removeContainer('browsing_client')
+    mgr.removeContainer('web_server_host')
+    mgr.removeContainer('web_browser')
     net.stop()
     mgr.stop()
